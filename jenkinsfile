@@ -1,0 +1,105 @@
+pipeline {
+    agent any
+    environment {
+		DOCKERHUB_CREDENTIALS=credentials('locthp_dockerhub')
+		GITLAB_CREDENTIALS=credentials('locthp_git')
+		//Set Xtract Folder
+		//GF='/var/lib/jenkins/workspace/locthp-testing/locthp-testing'
+		//Set URL for remotely manipulating
+		XTRACTURL='https://git.digi-texx.vn/dbdd-solution-team/xtract-core.git'
+		//Set dockerhub-URL
+		DOCKER_URL='https://docker-registry.digi-texx.vn'
+		gitcredentialID='locthp_git'
+		TOKEN=credentials('locthp-git-token-secret')
+	}
+    stages{
+            stage('LOAD-GIT')
+            {
+                steps {
+                    // //check xtract folder exists or not
+                    // //if it exists, we're going to pull all changes. Otherwise, we clone the new one
+                    // sh 'env'
+                    // sh 'if [ -d "$GF" ]; then echo "Folder existing. Pulling..."; cd $GF; git checkout $gitlabTargetBranch && git fetch origin $gitlabTargetBranch; else echo "Folder not existing yet. Cloning..."; git clone $XTRACTURL && cd $GF; pwd $; fi'
+                    // //Set working directory
+                    // dir ("$env.GF"){
+                    //     sh 'git submodule sync && git submodule update --init --recursive --remote'
+                    //     sh 'git diff remotes/origin/$gitlabTargetBranch'
+                    // }        
+                    git([url: XTRACTURL, branch: gitlabTargetBranch, credentialsId: gitcredentialID])
+                }
+            }
+            stage('BUILD-AND-DEPLOY')
+            {
+                when { changeset "*/component_b/**"} // Insert folder of php-web right here.
+                stages{
+                    stage('BUILD-PHP-WEB-IMG'){
+                            steps{
+                                dir('./worker/database-worker/'){
+                                    script{
+                                        sh '''
+                                        set +e                    
+                                        echo \$DOCKERHUB_CREDENTIALS_PSW | docker login -u \$DOCKERHUB_CREDENTIALS_USR --password-stdin \$DOCKER_URL
+                                        IMG=docker-registry.digi-texx.vn/digi-xtract/xtract-db
+                                        STAGINGTAG=staging
+                                        BKTAG=stagingbk
+                                                
+                                        docker manifest inspect \$IMG:\$STAGINGTAG > /dev/null
+                                                
+                                        if [ \$? = 0 ]; then
+                                                    
+                                            docker pull \$IMG:\$STAGINGTAG
+                                                    
+                                            docker tag \$IMG:\$STAGINGTAG \$IMG:\$BKTAG
+                                                    
+                                            docker build -t \$IMG:\$STAGINGTAG .
+                                                
+                                        else
+                                            docker build -t \$IMG:\$STAGINGTAG .
+                                        fi
+                                        '''
+                                    }
+                                }
+                            }
+                    }
+                    stage('PUSH-PHP-WEB-IMG'){
+                        steps{
+                                script{
+                                    sh'''
+                                    set +e
+                                    IMG=docker-registry.digi-texx.vn/digi-xtract/xtract-db
+                                    STAGINGTAG=staging
+                                    BKTAG=stagingbk
+                                                
+                                    docker manifest inspect \$IMG:\$STAGINGTAG > /dev/null
+                                                
+                                    if [ \$? = 0 ]; then
+                                        docker push \$IMG:\$BKTAG
+                                        docker push \$IMG:\$STAGINGTAG
+
+                                        docker rmi \$IMG:\$BKTAG
+                                        docker rmi \$IMG:\$STAGINGTAG
+                                                
+                                                
+                                    else
+                                        docker push \$IMG:\$STAGINGTAG
+                                        docker rmi \$IMG:\$STAGINGTAG
+                                    fi
+                                    '''
+                            }
+                        }
+                    }
+                    stage('DEPLOY-PHP-WEB-IMG-TO-K8S'){
+                        steps{
+                            steps{
+                                sh '''
+                                    URL=https://git.digi-texx.vn/dbdd-solution-team/xtract-cicd/raw/master/deployment/xtract-db/xtract-db-deploy.yaml
+                                    curl --header "PRIVATE-TOKEN:\$TOKEN" -sfL \$URL | kubectl \"--kubeconfig=/opt/kubeconfig/xtract-staging.yaml\" apply -f -
+                                    kubectl \"--kubeconfig=/opt/kubeconfig/xtract-staging.yaml\" rollout restart -n xtract-staging deployment w-xtract-db
+                                    '''
+                            }
+                        }
+                    }
+                }
+            }
+        }
+}
